@@ -8709,6 +8709,33 @@ const AdminAssignExaminers = ({ user }) => {
   const [selectedCourse, setSelectedCourse] = useState(null);
   const [message, setMessage] = useState("");
   const [assignedExaminers, setAssignedExaminers] = useState({}); // { secondExaminer: email, thirdExaminer: email }
+  // Additive convenience: lets Admin pick a course from a dropdown instead
+  // of having to type the exact name/code/year/batch. Does not replace or
+  // change the existing manual fields or handleLoadCourse below — just
+  // auto-fills them, so nothing about the original flow changes.
+  const [allCoursesList, setAllCoursesList] = useState([]);
+
+  useEffect(() => {
+    if (!isAuthReady || !userId) return;
+    const fetchAllCourses = async () => {
+      try {
+        const coursesColRef = collection(
+          db,
+          getCollectionPath("courses_offered", userId),
+        );
+        const querySnapshot = await getDocs(coursesColRef);
+        const coursesList = querySnapshot.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .sort((a, b) =>
+            (a.courseName || "").localeCompare(b.courseName || ""),
+          );
+        setAllCoursesList(coursesList);
+      } catch (error) {
+        console.error("Failed to fetch course list for quick select:", error);
+      }
+    };
+    fetchAllCourses();
+  }, [isAuthReady, userId, db]);
 
   const academicYears = [
     "2021-2022",
@@ -8909,6 +8936,40 @@ const AdminAssignExaminers = ({ user }) => {
         <h3 className="text-xl font-semibold text-gray-800 mb-2">
           Load Course Details
         </h3>
+        {allCoursesList.length > 0 && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Quick select a course (fills the fields below)
+            </label>
+            <select
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              defaultValue=""
+              onChange={(e) => {
+                const course = allCoursesList.find(
+                  (c) => c.id === e.target.value,
+                );
+                if (course) {
+                  setCourseName(course.courseName || "");
+                  setCourseCode(course.courseCode || "");
+                  setBatchYear(course.studentBatchYear || "");
+                  setAcademicYear(course.academicYear || "");
+                }
+              }}
+            >
+              <option value="">-- Select a course --</option>
+              {allCoursesList.map((course) => (
+                <option key={course.id} value={course.id}>
+                  {course.courseName} ({course.courseCode}) — Batch{" "}
+                  {course.studentBatchYear}, {course.academicYear}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Picking a course here fills in the fields below — click "Load
+              Course" afterwards as usual.
+            </p>
+          </div>
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700">
