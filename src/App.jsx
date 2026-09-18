@@ -11821,7 +11821,7 @@ const DepartmentSelectionPage = ({ onDepartmentSelect, navigateTo, departments }
   );
 };
 
-const App = () => {
+const AppContent = () => {
   const [currentPage, setCurrentPage] = React.useState('home');
   const [selectedDeptName, setSelectedDeptName] = React.useState('');
   const [showDepartmentApp, setShowDepartmentApp] = React.useState(false);
@@ -11845,9 +11845,15 @@ const App = () => {
     { name: "Pharmacy", code: "pharmacy", value: "pharmacy" }
   ];
 
+  // Wait for anonymous Firebase sign-in (provided by the AuthProvider that
+  // now wraps the whole app) before touching Firestore — otherwise
+  // request.auth is still null and the security rules reject the read.
+  const { isAuthReady } = useAuth();
+
   // Subscribe to the "departments" collection in Firestore in real time.
   // If it's empty (fresh install), seed it once with the default list.
   React.useEffect(() => {
+    if (!isAuthReady) return; // wait for sign-in to complete first
     const deptColRef = collection(db, getGlobalCollectionPath("departments"));
 
     const seedIfEmpty = async () => {
@@ -11877,7 +11883,7 @@ const App = () => {
       },
     );
     return () => unsubscribe();
-  }, []);
+  }, [isAuthReady]);
 
   // Navigation handler for top page
   const navigateTo = (page) => {
@@ -11941,7 +11947,7 @@ const App = () => {
   if (showDepartmentApp) {
     // Show the original department management system (MainAppContent)
     return (
-      <AuthProvider>
+      <>
         <style>{`
                 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
                 body { font-family: 'Inter', sans-serif; }
@@ -11962,7 +11968,7 @@ const App = () => {
                 .hover\\:bg-gray-50:hover { background-color: #f9fafb; }
         `}</style>
         <MainAppContent departmentName={selectedDeptName} navigateTo={navigateTo} />
-      </AuthProvider>
+      </>
     );
   }
 
@@ -12048,5 +12054,16 @@ const App = () => {
       return null;
   }
 };
+
+// Top-level App: wraps the whole application in AuthProvider so that
+// anonymous Firebase sign-in happens immediately on load, for every page
+// (Super Admin Dashboard, Department Selection, etc.) — not only after a
+// specific department is opened. This is required for Firestore security
+// rules that check `request.auth != null`.
+const App = () => (
+  <AuthProvider>
+    <AppContent />
+  </AuthProvider>
+);
 
 export default App;
