@@ -2878,7 +2878,13 @@ const UserProfile = ({ user, setLoggedInUser }) => {
     }
   };
 
-  const canEditAll = user?.role === "master_admin"; // Ensure user is not null
+  // This component only ever displays the CURRENTLY LOGGED-IN user's own
+  // profile (see <UserProfile user={loggedInUser} .../> below) — it never
+  // shows anyone else's data. So allowing "admin" here only lets an Admin
+  // edit their own info, same as Master Admin already could; it does not
+  // grant any ability to edit other users, which stays Master-Admin-only
+  // (handled separately in AdminUserManagement).
+  const canEditAll = user?.role === "master_admin" || user?.role === "admin";
 
   return (
     <Card title="My Profile">
