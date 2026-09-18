@@ -40,7 +40,6 @@ import {
 import {
   User,
   Files,
-  Signature,
   FileText,
   UserCheck,
   CheckCircle,
@@ -2155,11 +2154,31 @@ const getMockUsers = (departmentName) => [
 ];
 
 // Utility function to get collection path based on user ID and app ID
+//
+// IMPORTANT: A handful of collection names hold data that must be shared
+// across every login within a department (the roster of users, courses,
+// enrollments, grades, examiner assignments) rather than being private to
+// whichever individual happens to be logged in. Previously these were
+// resolved to a per-user private path keyed by the CURRENT session's own
+// Firebase Auth uid, which meant a teacher, a second examiner, a third
+// examiner, and an admin — each being a separate anonymous login — could
+// never see data another one of them had saved. Routing these fixed
+// collection names through the shared/public path (the same path
+// getCollectionPath(..., true) already uses) fixes that at the source,
+// for every call site, without having to track down and edit each one.
+const DEPARTMENT_SHARED_COLLECTIONS = new Set([
+  "users",
+  "courses_offered",
+  "student_course_enrollments",
+  "course_grades",
+  "examiner_assignments",
+]);
+
 const getCollectionPath = (collectionName, currentUserId, isPublic = false, departmentName = null) => {
   const selectedDept = departmentName || window.selectedDepartmentName || "default";
   const deptSlug = selectedDept.toLowerCase().replace(/[^a-z0-9]/g, '-');
-  
-  if (isPublic) {
+
+  if (isPublic || DEPARTMENT_SHARED_COLLECTIONS.has(collectionName)) {
     return `artifacts/${appId}/public/data/${deptSlug}_${collectionName}`;
   }
   return `artifacts/${appId}/users/${currentUserId}/${deptSlug}_${collectionName}`;
@@ -6974,6 +6993,8 @@ const AdminManageUsers = ({
   const [newUserAddress, setNewUserAddress] = useState("");
   const [newUserPhone, setNewUserPhone] = useState("");
   const [newUserPersonalEmail, setNewUserPersonalEmail] = useState("");
+  const [newUserInstitution, setNewUserInstitution] = useState("");
+  const [newUserIsExternal, setNewUserIsExternal] = useState(false);
 
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmModalMessage, setConfirmModalMessage] = useState("");
@@ -7246,6 +7267,16 @@ const AdminManageUsers = ({
         address: newUserAddress,
         phone: newUserPhone,
         personalEmail: newUserPersonalEmail,
+        // Third Examiners may belong to another department or an entirely
+        // different university — record that so Admin can tell them apart
+        // when assigning examiners. Not applicable/required for teachers
+        // or second examiners, who are assumed to be within this department.
+        ...(newUserRole === "third_examiner"
+          ? {
+              isExternal: newUserIsExternal,
+              institution: newUserIsExternal ? newUserInstitution : "",
+            }
+          : {}),
       });
     } else if (newUserRole === "admin" || newUserRole === "master_admin") {
       Object.assign(newUser, {
@@ -7664,6 +7695,48 @@ onChange={(e) => setNewUserPhone(e.target.value)}
                       onChange={(e) => setNewUserPhone(e.target.value)}
                     />
                   </div>
+                  {newUserRole === "third_examiner" && (
+                    <>
+                      <div className="flex items-center space-x-2">
+                        <input
+                          type="checkbox"
+                          id="newUserIsExternal"
+                          checked={newUserIsExternal}
+                          onChange={(e) =>
+                            setNewUserIsExternal(e.target.checked)
+                          }
+                        />
+                        <label
+                          htmlFor="newUserIsExternal"
+                          className="text-sm font-medium text-gray-700"
+                        >
+                          External examiner (another department or
+                          university)
+                        </label>
+                      </div>
+                      {newUserIsExternal && (
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700">
+                            Institution / University
+                          </label>
+                          <input
+                            type="text"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                            placeholder="e.g. Dept. of Economics, University of Dhaka"
+                            value={newUserInstitution}
+                            onChange={(e) =>
+                              setNewUserInstitution(e.target.value)
+                            }
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            They will still get a login for this system
+                            (username/password below) to submit marks —
+                            this is just to identify their real affiliation.
+                          </p>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </>
               )}
 
@@ -9177,6 +9250,7 @@ const SecondExaminerEvaluation = ({ user }) => {
 
     try {
       const batch = writeBatch(db);
+      let anyDiscrepancyFound = false;
       for (const student of enrolledStudents) {
         const studentEmail = student.email;
         const markEntry = finalMarks[studentEmail];
@@ -9208,10 +9282,7 @@ const SecondExaminerEvaluation = ({ user }) => {
           );
           if (difference > THIRD_EXAMINER_THRESHOLD) {
             status = "pending_third_examiner";
-            // Notify admin that third examiner is needed (optional, can be done via a separate notification system)
-            console.log(
-              `Third examiner needed for ${selectedCourse.courseName} for student ${student.rollNumber}`,
-            );
+            anyDiscrepancyFound = true;
           } else {
             status = "finalized"; // If difference is within threshold, finalize
             // Set finalCombinedMark as the average of first and second examiner marks
@@ -9249,26 +9320,32 @@ const SecondExaminerEvaluation = ({ user }) => {
         );
       }
       await batch.commit();
-      // 1. Send notification to admin after successful submission
-      const notificationsColRef = collection(
-        db,
-        getCollectionPath("notifications", userId, true), // Public collection for notifications
-      );
-      await addDoc(notificationsColRef, {
-        type: "second_examiner_final_result_submission",
-        message: `Second Examiner ${user.name} (${user.email}) has submitted final results for ${selectedCourse.courseName} (${selectedCourse.courseCode}) for academic year ${selectedCourse.academicYear}. Please review the results or assign a Third Examiner if needed.`,
-        courseId: selectedCourse.id,
-        courseName: selectedCourse.courseName,
-        courseCode: selectedCourse.courseCode,
-        academicYear: selectedCourse.academicYear,
-        studentsYearOfEnrollment: selectedCourse.studentsYearOfEnrollment, // Session identifier
-        teacherEmail: selectedCourse.teacherEmail,
-        timestamp: new Date().toISOString(),
-        read: false,
-        targetRole: "admin", // Target admins/master_admins
-      });
-      // 2. Update the message to the new required text
-      setMessage("Final marks saved successfully and notification sent to Admin!");
+      // Notify admin ONLY when a discrepancy needing a Third Examiner was
+      // found for at least one student — never on an ordinary submission,
+      // and never with the actual marks in the message (blind grading:
+      // the admin should know that a discrepancy exists, not what it is).
+      if (anyDiscrepancyFound) {
+        const notificationsColRef = collection(
+          db,
+          getCollectionPath("notifications", userId, true), // Public collection for notifications
+        );
+        await addDoc(notificationsColRef, {
+          type: "third_examiner_needed",
+          message: `A mark discrepancy of more than ${THIRD_EXAMINER_THRESHOLD} was found between the First and Second Examiner for one or more students in ${selectedCourse.courseName} (${selectedCourse.courseCode}), academic year ${selectedCourse.academicYear}. Please assign a Third Examiner.`,
+          courseId: selectedCourse.id,
+          courseName: selectedCourse.courseName,
+          courseCode: selectedCourse.courseCode,
+          academicYear: selectedCourse.academicYear,
+          studentsYearOfEnrollment: selectedCourse.studentsYearOfEnrollment, // Session identifier
+          teacherEmail: selectedCourse.teacherEmail,
+          timestamp: new Date().toISOString(),
+          read: false,
+          targetRole: "admin", // Target admins/master_admins
+        });
+        setMessage("Final marks saved. A discrepancy was found, so Admin has been notified to assign a Third Examiner.");
+      } else {
+        setMessage("Final marks saved successfully.");
+      }
     } catch (error) {
       console.error("Failed to save final marks:", error);
       setMessage("Failed to save final marks.");
