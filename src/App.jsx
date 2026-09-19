@@ -577,7 +577,7 @@ const ResultManagementSystem = ({ navigateTo }) => {
 };
 
 // Component for the Exam Officer's Result Calculator
-const OfficerResultCalculator = ({ departmentName }) => {
+const OfficerResultCalculator = ({ departmentName, onBack }) => {
   const { db, userId, isAuthReady } = useAuth();
   const [academicYear, setAcademicYear] = useState("");
   const [batchYear, setBatchYear] = useState(""); // Admission year
@@ -597,6 +597,30 @@ const OfficerResultCalculator = ({ departmentName }) => {
   const [showTemplateUpload, setShowTemplateUpload] = useState(false);
   const [availableStudents, setAvailableStudents] = useState([]);
   const [availableRollNumbers, setAvailableRollNumbers] = useState([]);
+  // Real departments (from Firestore), used for the "Load Results"
+  // department filter so it matches exactly what a department is actually
+  // named when it sends results — the hardcoded `departments` list further
+  // below is left as-is for the existing "Generate Individual Document"
+  // section, to avoid touching that working code.
+  const [realDepartments, setRealDepartments] = useState([]);
+
+  useEffect(() => {
+    if (!isAuthReady) return;
+    const fetchDepartments = async () => {
+      try {
+        const deptColRef = collection(db, getGlobalCollectionPath("departments"));
+        const snapshot = await getDocs(deptColRef);
+        const names = snapshot.docs
+          .map((d) => d.data().name)
+          .filter(Boolean)
+          .sort();
+        setRealDepartments(names);
+      } catch (error) {
+        console.error("Failed to fetch department list:", error);
+      }
+    };
+    fetchDepartments();
+  }, [isAuthReady, db]);
 
   const academicYears = [
     "2021-2022",
@@ -895,135 +919,48 @@ const OfficerResultCalculator = ({ departmentName }) => {
   const handleLoadResults = async () => {
     setMessage("");
     setResults([]);
-    if (!isAuthReady || !userId || !academicYear || !batchYear) {
-      setMessage("Please select both Academic Year and Student Batch Year.");
+    if (!isAuthReady || !userId || !selectedDepartment || !academicYear || !batchYear) {
+      setMessage("Please select Department, Academic Year, and Student Batch Year.");
+      return;
+    }
+    if (dataSource === "archive") {
+      setMessage(
+        "Archived results are not connected to this view yet -- only current, department-submitted results can be loaded here for now.",
+      );
       return;
     }
 
     try {
-      const gradesCollectionName =
-        dataSource === "current" ? "course_grades" : "archived_results";
-      const gradesColRef = collection(
+      // Departments send their finalized results here (see "Send to Exam
+      // Controller Office" in each department's own Result Calculator) --
+      // this is one shared, university-wide collection, so there's no need
+      // to know or guess any individual department's internal Firestore
+      // path.
+      const submittedColRef = collection(
         db,
-        getCollectionPath(gradesCollectionName, userId),
+        getGlobalCollectionPath("submitted_results"),
       );
-
-      // 1. Get all students from the selected batch year
-      const usersColRef = collection(db, getCollectionPath("users", userId));
-      const studentQuery = query(
-        usersColRef,
-        where("role", "in", ["student", "alumni"]), // Include alumni for historical results
-        where("batch", "==", batchYear),
+      const submittedQuery = query(
+        submittedColRef,
+        where("departmentName", "==", selectedDepartment),
+        where("academicYear", "==", academicYear),
+        where("session", "==", batchYear),
       );
-      const studentSnapshot = await getDocs(studentQuery);
-      const students = studentSnapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
+      const snapshot = await getDocs(submittedQuery);
+      const loadedResults = snapshot.docs
+        .map((d) => d.data())
+        .sort((a, b) => (a.serialNo || 0) - (b.serialNo || 0));
 
-      if (students.length === 0) {
-        setMessage(`No students found for Batch ${batchYear}.`);
+      if (loadedResults.length === 0) {
+        setMessage(
+          `No results have been sent yet by ${selectedDepartment} for Academic Year ${academicYear}, Batch ${batchYear}.`,
+        );
         return;
       }
 
-      // 2. Fetch grades for these students for the selected academic year
-      const aggregatedResults = [];
-      let serialNo = 1;
-
-      for (const student of students) {
-        const studentGradesQuery = query(
-          gradesColRef,
-          where("studentEmail", "==", student.email),
-          where("academicYear", "==", academicYear),
-        );
-        const studentGradesSnapshot = await getDocs(studentGradesQuery);
-        const studentGrades = studentGradesSnapshot.docs.map((doc) =>
-          doc.data(),
-        );
-
-        if (studentGrades.length === 0) {
-          // If no grades for this student in this academic year, still add an entry
-          aggregatedResults.push({
-            serialNo: serialNo++,
-            studentRollNumber: student.rollNumber,
-            studentName: student.name,
-            courseName: "No Courses",
-            courseCode: "N/A",
-            assignmentMarks: "N/A",
-            inCourseMarks: "N/A",
-            combinedAverage: "N/A", // Added combined average
-            attendanceMarks: "N/A",
-            finalExamMarks: "N/A",
-            totalMarks: "N/A",
-            session: student.batch,
-            academicYear: academicYear,
-            studentEmail: student.email,
-          });
-          continue;
-        }
-
-        for (const grade of studentGrades) {
-          const avgInCourse = calculateAverage(grade.inCourseMarks);
-          const combinedAvg = calculateCombinedAssignmentAndInCourseAverage(
-            grade.assignmentMarks,
-            grade.inCourseMarks,
-          );
-
-          // --- Final Exam Mark Calculation Logic ---
-          let finalExamMarkDisplay = "N/A";
-          let totalMarks = "N/A";
-          const firstExaminerMark = parseFloat(grade.finalExamMarks);
-          const secondExaminerMark = parseFloat(grade.secondExaminerFinalMark);
-          const thirdExaminerMark = parseFloat(grade.thirdExaminerFinalMark);
-          const hasFirst = !isNaN(firstExaminerMark) && grade.finalExamMarks !== undefined && grade.finalExamMarks !== "";
-          const hasSecond = !isNaN(secondExaminerMark) && grade.secondExaminerFinalMark !== undefined && grade.secondExaminerFinalMark !== "";
-          const hasThird = !isNaN(thirdExaminerMark) && grade.thirdExaminerFinalMark !== undefined && grade.thirdExaminerFinalMark !== "";
-
-          if (hasThird) {
-            finalExamMarkDisplay = thirdExaminerMark.toFixed(2);
-            totalMarks = (parseFloat(combinedAvg) + (grade.attendanceMarks || 0) + thirdExaminerMark).toFixed(2);
-          } else if (hasFirst && hasSecond) {
-            const diff = Math.abs(firstExaminerMark - secondExaminerMark);
-            if (diff >= THIRD_EXAMINER_THRESHOLD) {
-              // Discrepancy, but no third examiner mark yet
-              finalExamMarkDisplay = "N/A";
-              totalMarks = "N/A";
-            } else {
-              const avg = ((firstExaminerMark + secondExaminerMark) / 2).toFixed(2);
-              finalExamMarkDisplay = avg;
-              totalMarks = (parseFloat(combinedAvg) + (grade.attendanceMarks || 0) + parseFloat(avg)).toFixed(2);
-            }
-          } else if (hasFirst) {
-            // Only first examiner mark present (should not usually happen, but fallback)
-            finalExamMarkDisplay = firstExaminerMark.toFixed(2);
-            totalMarks = (parseFloat(combinedAvg) + (grade.attendanceMarks || 0) + firstExaminerMark).toFixed(2);
-          } else {
-            finalExamMarkDisplay = "N/A";
-            totalMarks = "N/A";
-          }
-          // --- End Final Exam Mark Calculation Logic ---
-
-          aggregatedResults.push({
-            serialNo: serialNo++,
-            studentRollNumber: student.rollNumber,
-            studentName: student.name,
-            courseName: grade.courseName,
-            courseCode: grade.courseCode,
-            assignmentMarks: grade.assignmentMarks?.[0]?.score || 0,
-            inCourseMarks: avgInCourse,
-            attendanceMarks: grade.attendanceMarks || 0,
-            finalExamMarks: finalExamMarkDisplay,
-            combinedAverage: combinedAvg, // Store combined average
-            totalMarks: totalMarks,
-            session: student.batch, // Student's admission batch
-            academicYear: academicYear, // Academic year of the course
-            studentEmail: student.email,
-          });
-        }
-      }
-      setResults(aggregatedResults);
+      setResults(loadedResults);
       setMessage(
-        `Results loaded from ${dataSource === "current" ? "current data" : "archive"} for Academic Year ${academicYear}, Batch ${batchYear}.`,
+        `Loaded ${loadedResults.length} result(s) sent by ${selectedDepartment} for Academic Year ${academicYear}, Batch ${batchYear}.`,
       );
     } catch (error) {
       console.error("Error loading results:", error);
@@ -1211,14 +1148,41 @@ const OfficerResultCalculator = ({ departmentName }) => {
   return (
     <div className="p-8 space-y-8 text-white">
       <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
-        <div className="flex items-center space-x-4 mb-6">
-          <Calculator className="w-8 h-8 text-indigo-400" />
-          <h2 className="text-2xl font-bold font-inter">Result Calculator - Exam Officer Access</h2>
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center space-x-4">
+            <Calculator className="w-8 h-8 text-indigo-400" />
+            <h2 className="text-2xl font-bold font-inter">Result Calculator - Exam Officer Access</h2>
+          </div>
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg shadow-md transition duration-200"
+            >
+              ← Back to Dashboard
+            </button>
+          )}
         </div>
         <p className="text-gray-400 mb-6">Access integrated result calculations from Department Admins for individual marksheet and certificate generation.</p>
         
         <div className="mb-6 space-y-4">
           <div className="flex flex-col md:flex-row md:space-x-4 space-y-4 md:space-y-0">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Select Department
+              </label>
+              <select
+                className="w-full px-3 py-2 bg-gray-700 text-gray-300 border border-gray-600 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                value={selectedDepartment}
+                onChange={(e) => setSelectedDepartment(e.target.value)}
+              >
+                <option value="">Select Department</option>
+                {realDepartments.map((dept) => (
+                  <option key={dept} value={dept}>
+                    {dept}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="flex-1">
               <label className="block text-sm font-medium text-gray-300 mb-2">
                 Select Academic Year
@@ -1999,6 +1963,7 @@ const OfficerResultCalculator = ({ departmentName }) => {
           <main className="p-4 md:p-8">
             {/* Conditional rendering based on the current page */}
             {currentPage === 'dashboard' && userRole === 'officer' && <OfficerDashboard setView={setCurrentPage} />}
+            {currentPage === 'officer_result_calculator' && userRole === 'officer' && <OfficerResultCalculator departmentName="" onBack={() => setCurrentPage('dashboard')} />}
             {currentPage === 'dashboard' && userRole === 'controller' && <ControllerDashboard setView={setCurrentPage} />}
             {currentPage === 'profile' && <ProfilePage />}
           </main>
@@ -8348,6 +8313,7 @@ const AdminResultCalculator = ({ departmentName }) => {
           // If no grades for this student in this academic year, still add an entry
           aggregatedResults.push({
             serialNo: serialNo++,
+            studentEmail: student.email,
             studentRollNumber: student.rollNumber,
             studentName: student.name,
             courseName: "No Courses",
@@ -8407,6 +8373,7 @@ const AdminResultCalculator = ({ departmentName }) => {
 
           aggregatedResults.push({
             serialNo: serialNo++,
+            studentEmail: student.email,
             studentRollNumber: student.rollNumber,
             studentName: student.name,
             courseName: grade.courseName,
@@ -8429,6 +8396,58 @@ const AdminResultCalculator = ({ departmentName }) => {
     } catch (error) {
       console.error("Error loading results:", error);
       setMessage("Failed to load results.");
+    }
+  };
+
+  const handleSendToExamController = async () => {
+    if (results.length === 0) {
+      setMessage("No results to send. Please load results first.");
+      return;
+    }
+    const sendable = results.filter(
+      (r) => r.totalMarks !== "N/A" && r.courseCode !== "N/A",
+    );
+    if (sendable.length === 0) {
+      setMessage(
+        "None of the loaded results are finalized yet (final marks are still N/A for all of them), so there is nothing to send.",
+      );
+      return;
+    }
+    try {
+      const batch = writeBatch(db);
+      const deptSlug = (departmentName || "default")
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "-");
+      for (const row of sendable) {
+        const docId = `${deptSlug}_${row.studentRollNumber}_${row.courseCode}_${row.academicYear}`.replace(
+          /[^a-zA-Z0-9_-]/g,
+          "_",
+        );
+        const docRef = doc(
+          db,
+          getGlobalCollectionPath("submitted_results"),
+          docId,
+        );
+        batch.set(
+          docRef,
+          {
+            ...row,
+            departmentName: departmentName || "",
+            sentAt: new Date().toISOString(),
+          },
+          { merge: true },
+        );
+      }
+      await batch.commit();
+      setMessage(
+        `Sent ${sendable.length} of ${results.length} result(s) to the Exam Controller Office.` +
+          (sendable.length < results.length
+            ? ` ${results.length - sendable.length} row(s) were skipped because their final marks are not resolved yet.`
+            : ""),
+      );
+    } catch (error) {
+      console.error("Failed to send results to Exam Controller Office:", error);
+      setMessage("Failed to send results to Exam Controller Office.");
     }
   };
 
@@ -8691,7 +8710,13 @@ const AdminResultCalculator = ({ departmentName }) => {
               </tbody>
             </table>
           </div>
-          <div className="text-right">
+          <div className="text-right space-x-3">
+            <button
+              onClick={handleSendToExamController}
+              className="bg-purple-600 hover:bg-purple-700 text-white px-5 py-2 rounded-lg shadow-md transition duration-200"
+            >
+              Send to Exam Controller Office
+            </button>
             <button
               onClick={handleDownloadResults}
               className="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg shadow-md transition duration-200"
